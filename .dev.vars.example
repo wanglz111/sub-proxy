@@ -1,0 +1,6 @@
+ADMIN_TOKEN=change-me
+ACCESS_TOKEN=change-me
+REQUIRE_SUB_TOKEN=true
+CONVERTER_BASE_URL=https://api.wd-purple.com/sub
+SUB_URLS="https://example.com/subscribe/first
+https://example.com/subscribe/second"

@@ -1,0 +1,17 @@
+{
+  "name": "sub-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "update-types": "wrangler types",
+    "check": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.13.0"
+  }
+}

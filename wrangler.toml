@@ -1,0 +1,30 @@
+name = "sub-proxy"
+main = "src/index.js"
+compatibility_date = "2025-12-03"
+preview_urls = false
+
+routes = [
+  { pattern = "sub.gleaftex.com", zone_name = "gleaftex.com", custom_domain = true }
+]
+
+# Cloudflare Cron uses UTC. 16:00 UTC = 00:00 Asia/Shanghai.
+[triggers]
+crons = ["0 16 * * *"]
+
+[[r2_buckets]]
+binding = "SUB_BUCKET"
+bucket_name = "sub"
+
+[vars]
+# Optional. If set, all subscription endpoints require ?token=ADMIN_TOKEN
+# / ?token=ACCESS_TOKEN or Authorization: Bearer <token>.
+REQUIRE_SUB_TOKEN = "true"
+
+# Converter compatible with subconverter-style query params.
+CONVERTER_BASE_URL = "https://api.wd-purple.com/sub"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
