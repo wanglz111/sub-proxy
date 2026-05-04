@@ -251,8 +251,8 @@ function buildClashYaml(proxies) {
 
   const proxyNames = proxies.map((proxy) => proxy.name).filter(Boolean);
   for (const group of config["proxy-groups"] || []) {
-    if (Array.isArray(group.proxies)) {
-      group.proxies = [...group.proxies, ...proxyNames];
+    if (Array.isArray(group.proxies) && group.proxies.length === 0) {
+      group.proxies = proxyNames;
     }
   }
 
