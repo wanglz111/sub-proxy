@@ -20,8 +20,23 @@ export default {
 
       if (url.pathname === "/update") {
         requireAdmin(request, env);
-        const result = await runUpdateOnce(env);
-        return jsonResponse(result);
+
+        if (request.method === "GET") {
+          return jsonResponse(buildExternalUpdateJob(env));
+        }
+
+        if (request.method === "POST") {
+          const payload = await request.json();
+          const result = await runExternalUpdate(env, payload);
+          return jsonResponse(result);
+        }
+
+        return new Response("Method Not Allowed", {
+          status: 405,
+          headers: {
+            Allow: "GET, POST"
+          }
+        });
       }
 
       if (url.pathname === "/clash" || url.pathname === "/sub") {
@@ -49,18 +64,14 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      runUpdateOnce(env)
-        .then((result) => console.log("Cron executed:", event.cron, result.updated_at))
-        .catch((err) => {
-          console.error("Cron failed:", err);
-          throw err;
-        })
-    );
+    ctx.waitUntil(Promise.resolve().then(() => {
+      console.log("Cron skipped for external updater mode:", event.cron);
+      void env;
+    }));
   }
 };
 
-async function runUpdateOnce(env) {
+function buildExternalUpdateJob(env) {
   const upstreamUrls = getUpstreamUrls(env);
   if (upstreamUrls.length === 0) {
     throw httpError(400, "No upstream subscriptions configured. Set SUB_URLS.");
@@ -69,18 +80,66 @@ async function runUpdateOnce(env) {
   const converterBaseUrl = env[SUBSCRIPTION_CONFIG.converterBaseUrlEnv] ||
     SUBSCRIPTION_CONFIG.defaultConverterBaseUrl;
 
-  const clashResults = await collectResults(
-    upstreamUrls.map((subUrl, index) => fetchClashSubscription(converterBaseUrl, subUrl, index))
-  );
-  const shadowrocketResults = await collectResults(
-    upstreamUrls.map((subUrl, index) => fetchShadowrocketSubscription(converterBaseUrl, subUrl, index))
+  return {
+    ok: true,
+    mode: "external-fetch",
+    requested_at: new Date().toISOString(),
+    upstream_count: upstreamUrls.length,
+    request_headers: SUBSCRIPTION_CONFIG.requestHeaders,
+    sources: upstreamUrls.map((subUrl, index) => ({
+      index,
+      source_url: subUrl,
+      request_headers: SUBSCRIPTION_CONFIG.requestHeaders,
+      direct_url: subUrl,
+      clash_url: isConvertedSubscriptionUrl(subUrl) ? convertExistingConverterUrl(subUrl, {
+        ...SUBSCRIPTION_CONFIG.clashConverterParams,
+        filename: `sub-${index + 1}`
+      }) : buildConverterUrl(converterBaseUrl, subUrl, {
+        ...SUBSCRIPTION_CONFIG.clashConverterParams,
+        filename: `sub-${index + 1}`
+      }),
+      shadowrocket_url: isConvertedSubscriptionUrl(subUrl) ? convertExistingConverterUrl(subUrl, {
+        ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
+        filename: `sub-${index + 1}`
+      }) : buildConverterUrl(converterBaseUrl, subUrl, {
+        ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
+        filename: `sub-${index + 1}`
+      })
+    }))
+  };
+}
+
+async function runExternalUpdate(env, payload) {
+  const upstreamUrls = getUpstreamUrls(env);
+  if (upstreamUrls.length === 0) {
+    throw httpError(400, "No upstream subscriptions configured. Set SUB_URLS.");
+  }
+
+  const submittedSources = Array.isArray(payload?.sources) ? payload.sources : null;
+  if (!submittedSources || submittedSources.length === 0) {
+    throw httpError(400, "POST /update requires a JSON body with a non-empty sources array.");
+  }
+
+  const sourceMap = new Map();
+  for (const entry of submittedSources) {
+    if (typeof entry?.index !== "number" || !Number.isInteger(entry.index)) {
+      throw httpError(400, "Each submitted source must include an integer index.");
+    }
+    sourceMap.set(entry.index, entry);
+  }
+
+  const processedSources = upstreamUrls.map((subUrl, index) =>
+    processExternalSource(index, subUrl, sourceMap.get(index))
   );
 
+  const clashResults = processedSources.map((source) => source.clashResult);
+  const shadowrocketResults = processedSources.map((source) => source.shadowrocketResult);
   const successfulClashResults = clashResults.filter((result) => result.ok).map((result) => result.value);
   const successfulShadowrocketResults = shadowrocketResults.filter((result) => result.ok).map((result) => result.value);
   const proxies = uniqueProxiesByName(successfulClashResults.flatMap((result) => result.proxies));
+
   if (proxies.length === 0) {
-    throw httpError(502, `Upstream subscriptions returned no Clash proxies.\n${formatResultErrors(clashResults)}`);
+    throw httpError(502, `External updater returned no Clash proxies.\n${formatResultErrors(clashResults)}`);
   }
 
   const clashYaml = buildClashYaml(proxies);
@@ -101,11 +160,13 @@ async function runUpdateOnce(env) {
   });
   await env.SUB_BUCKET.put(OBJECTS.meta, JSON.stringify({
     updated_at: new Date().toISOString(),
+    update_mode: "external-fetch",
+    updater_requested_at: payload?.requested_at || null,
     upstream_count: upstreamUrls.length,
     proxy_count: proxies.length,
     subscription_userinfo: subscriptionUserinfo,
     clash_sources: clashResults.map(publicSourceMeta),
-    shadowrocket_sources: shadowrocketResults.map(publicSourceMeta)
+    shadowrocket_sources: shadowrocketResults.map(publicShadowrocketMeta)
   }, null, 2), {
     httpMetadata: { contentType: JSON_TYPE }
   });
@@ -113,70 +174,161 @@ async function runUpdateOnce(env) {
   return {
     ok: true,
     updated_at: now,
+    update_mode: "external-fetch",
     upstream_count: upstreamUrls.length,
     proxy_count: proxies.length
   };
 }
 
-async function fetchClashSubscription(converterBaseUrl, subUrl, index) {
-  const direct = await fetchSubscriptionText(subUrl, `Clash upstream ${index + 1} direct`);
-  if (direct.ok) {
-    const proxies = parseClashProxies(direct.text);
+function processExternalSource(index, subUrl, submittedSource) {
+  if (!submittedSource) {
+    return {
+      clashResult: {
+        ok: false,
+        index,
+        error: `source ${index + 1} missing from submitted update payload`
+      },
+      shadowrocketResult: {
+        ok: false,
+        index,
+        error: `source ${index + 1} missing from submitted update payload`
+      }
+    };
+  }
+
+  if (submittedSource.source_url && submittedSource.source_url !== subUrl) {
+    return {
+      clashResult: {
+        ok: false,
+        index,
+        error: `source ${index + 1} URL mismatch`
+      },
+      shadowrocketResult: {
+        ok: false,
+        index,
+        error: `source ${index + 1} URL mismatch`
+      }
+    };
+  }
+
+  const direct = normalizeFetchedPayload(submittedSource.direct);
+  const clash = normalizeFetchedPayload(submittedSource.clash);
+  const shadowrocket = normalizeFetchedPayload(submittedSource.shadowrocket);
+
+  const directProxies = direct?.ok ? parseClashProxies(direct.text) : [];
+  if (direct?.ok && directProxies.length > 0) {
+    return {
+      clashResult: {
+        ok: true,
+        value: {
+          index,
+          status: direct.status,
+          mode: "direct",
+          subscriptionUserinfo: direct.subscriptionUserinfo,
+          proxies: directProxies
+        }
+      },
+      shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
+    };
+  }
+
+  if (clash?.ok) {
+    const proxies = parseClashProxies(clash.text);
     if (proxies.length > 0) {
       return {
-        index,
-        status: direct.status,
-        mode: "direct",
-        subscriptionUserinfo: direct.subscriptionUserinfo,
-        proxies
+        clashResult: {
+          ok: true,
+          value: {
+            index,
+            status: clash.status,
+            mode: "converter",
+            subscriptionUserinfo: clash.subscriptionUserinfo,
+            proxies
+          }
+        },
+        shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
       };
     }
   }
 
-  const fetchUrl = buildConverterUrl(converterBaseUrl, subUrl, {
-    ...SUBSCRIPTION_CONFIG.clashConverterParams,
-    filename: `sub-${index + 1}`
-  });
-
-  const converted = await fetchSubscriptionText(fetchUrl, `Clash upstream ${index + 1} converter`);
-  if (!converted.ok) {
-    throw httpError(502, converted.error);
-  }
-
-  const proxies = parseClashProxies(converted.text);
-  if (proxies.length === 0) {
-    throw httpError(502, `Clash upstream ${index + 1} returned no proxies.`);
-  }
-
   return {
-    index,
-    status: converted.status,
-    mode: "converter",
-    subscriptionUserinfo: converted.subscriptionUserinfo,
-    proxies
+    clashResult: {
+      ok: false,
+      index,
+      error: formatExternalClashError(index, direct, clash)
+    },
+    shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
   };
 }
 
-async function fetchShadowrocketSubscription(converterBaseUrl, subUrl, index) {
-  const fetchUrl = isConvertedSubscriptionUrl(subUrl) ? convertExistingConverterUrl(subUrl, {
-    ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
-    filename: `sub-${index + 1}`
-  }) : buildConverterUrl(converterBaseUrl, subUrl, {
-    ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
-    filename: `sub-${index + 1}`
-  });
-
-  const result = await fetchSubscriptionText(fetchUrl, `Shadowrocket upstream ${index + 1}`);
-  if (!result.ok) {
-    throw httpError(502, result.error);
+function buildShadowrocketResult(index, shadowrocket) {
+  if (!shadowrocket?.ok) {
+    return {
+      ok: false,
+      index,
+      error: shadowrocket?.error || `Shadowrocket upstream ${index + 1} returned no data.`
+    };
   }
 
   return {
-    index,
-    status: result.status,
-    subscriptionUserinfo: result.subscriptionUserinfo,
-    text: result.text
+    ok: true,
+    value: {
+      index,
+      status: shadowrocket.status,
+      mode: "converter",
+      subscriptionUserinfo: shadowrocket.subscriptionUserinfo,
+      text: shadowrocket.text
+    }
   };
+}
+
+function normalizeFetchedPayload(value) {
+  if (!value || typeof value !== "object") return null;
+
+  if (typeof value.ok !== "boolean") {
+    throw httpError(400, "Each submitted fetch result must include an ok boolean.");
+  }
+
+  if (value.ok) {
+    if (typeof value.text !== "string") {
+      throw httpError(400, "Successful submitted fetch results must include text.");
+    }
+
+    return {
+      ok: true,
+      status: Number.isFinite(Number(value.status)) ? Number(value.status) : 200,
+      subscriptionUserinfo: value.subscription_userinfo || value.subscriptionUserinfo || null,
+      text: value.text
+    };
+  }
+
+  return {
+    ok: false,
+    status: Number.isFinite(Number(value.status)) ? Number(value.status) : null,
+    error: value.error ? String(value.error) : "fetch failed"
+  };
+}
+
+function formatExternalClashError(index, direct, clash) {
+  const parts = [`Clash upstream ${index + 1} returned no proxies.`];
+
+  if (direct) {
+    parts.push(direct.ok
+      ? `direct status=${direct.status}, parsed_proxies=0`
+      : `direct failed: ${direct.error}`);
+  } else {
+    parts.push("direct missing");
+  }
+
+  if (clash) {
+    parts.push(clash.ok
+      ? `converter status=${clash.status}, parsed_proxies=0`
+      : `converter failed: ${clash.error}`);
+  } else {
+    parts.push("converter missing");
+  }
+
+  return parts.join("\n");
 }
 
 function buildConverterUrl(baseUrl, subUrl, params) {
@@ -203,37 +355,6 @@ function convertExistingConverterUrl(subUrl, params) {
     url.searchParams.set(key, value);
   }
   return url.toString();
-}
-
-async function fetchSubscriptionText(fetchUrl, label) {
-  let resp;
-  try {
-    resp = await fetch(fetchUrl, {
-      headers: SUBSCRIPTION_CONFIG.requestHeaders,
-      redirect: "follow"
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      error: `${label} fetch failed\n${err.stack || err}`
-    };
-  }
-
-  const text = await resp.text();
-  if (!resp.ok) {
-    return {
-      ok: false,
-      status: resp.status,
-      error: `${label} fetch failed\nstatus=${resp.status}\n${text.slice(0, 500)}`
-    };
-  }
-
-  return {
-    ok: true,
-    status: resp.status,
-    subscriptionUserinfo: resp.headers.get("subscription-userinfo"),
-    text
-  };
 }
 
 function parseClashProxies(text) {
@@ -474,23 +595,6 @@ function parseSubscriptionUserinfo(value) {
   return result;
 }
 
-function collectResults(promises) {
-  return Promise.allSettled(promises).then((results) => results.map((result, index) => {
-    if (result.status === "fulfilled") {
-      return {
-        ok: true,
-        value: result.value
-      };
-    }
-
-    return {
-      ok: false,
-      index,
-      error: result.reason?.message || String(result.reason)
-    };
-  }));
-}
-
 function formatResultErrors(results) {
   return results
     .filter((result) => !result.ok)
@@ -532,7 +636,7 @@ async function archiveObject(env, fromKey, toKey, contentType) {
 async function serveObject(env, key, contentType) {
   const obj = await env.SUB_BUCKET.get(key);
   if (!obj) {
-    return new Response("Subscription not initialized. Open /update first.", { status: 404 });
+    return new Response("Subscription not initialized. Run the VPS updater first.", { status: 404 });
   }
 
   const headers = {
@@ -583,6 +687,24 @@ function isAuthorized(request, env, tokenNames = ["ADMIN_TOKEN"]) {
 }
 
 function publicSourceMeta(result) {
+  if (!result.ok) {
+    return {
+      ok: false,
+      index: result.index,
+      error: result.error
+    };
+  }
+
+  return {
+    ok: true,
+    index: result.value.index,
+    status: result.value.status,
+    mode: result.value.mode,
+    has_subscription_userinfo: Boolean(result.value.subscriptionUserinfo)
+  };
+}
+
+function publicShadowrocketMeta(result) {
   if (!result.ok) {
     return {
       ok: false,

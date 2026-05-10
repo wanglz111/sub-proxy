@@ -6,7 +6,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "update-types": "wrangler types",
-    "check": "wrangler deploy --dry-run"
+    "check": "wrangler deploy --dry-run",
+    "update:vps": "node scripts/vps-update.mjs",
+    "update:vps:loop": "node scripts/vps-loop.mjs"
   },
   "dependencies": {
     "yaml": "^2.7.0"

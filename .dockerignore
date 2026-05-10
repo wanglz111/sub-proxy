@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.git
+.github
+.wrangler
+.dev.vars
+.env
+.env.*
+README.md
+src
+wrangler.toml
