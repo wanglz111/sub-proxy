@@ -87,9 +87,14 @@ UPSTREAM_ACCEPT_LANGUAGE=zh-CN,zh-Hans;q=0.9
 SUB_URL_1=https://example.com/subscription-1
 SUB_URL_2=https://example.com/subscription-2
 SUB_URL_3=
+SUB_FALLBACK_1=false
+SUB_FALLBACK_2=true
+SUB_FALLBACK_3=false
 ```
 
 `SUB_URL_1` and `SUB_URL_2` are typical. `SUB_URL_3` is optional and can be left empty.
+If a source is known to rotate tokens but old nodes remain usable, set its matching `SUB_FALLBACK_n=true`.
+Example: keep `SUB_FALLBACK_2=true` for a `wd-purple.com` source so a failed refresh reuses the last successful version instead of dropping those nodes.
 
 3. Start the updater:
 
@@ -137,6 +142,9 @@ export ADMIN_TOKEN="your-admin-token"
 export SUB_URL_1="https://example.com/subscription-1"
 export SUB_URL_2="https://example.com/subscription-2"
 export SUB_URL_3=""
+export SUB_FALLBACK_1="false"
+export SUB_FALLBACK_2="true"
+export SUB_FALLBACK_3="false"
 npm run update:vps
 ```
 
@@ -149,6 +157,9 @@ export UPDATE_INTERVAL_SECONDS="1800"
 export SUB_URL_1="https://example.com/subscription-1"
 export SUB_URL_2="https://example.com/subscription-2"
 export SUB_URL_3=""
+export SUB_FALLBACK_1="false"
+export SUB_FALLBACK_2="true"
+export SUB_FALLBACK_3="false"
 npm run update:vps:loop
 ```
 
@@ -159,6 +170,7 @@ npm run update:vps:loop
 - The Worker still does deduplication, Clash template assembly, Shadowrocket merge, metadata generation, and R2 archival.
 - If a direct upstream response is already Clash YAML with `proxies`, the Worker prefers that.
 - If the direct response is not Clash YAML, the VPS also fetches converter URLs and the Worker falls back to those results.
+- If `SUB_FALLBACK_n=true` and that source fails this round, the Worker reuses that source's last successful stored result instead of dropping it.
 - Upstream request headers are controlled from the VPS `.env`, so you can adjust client impersonation without redeploying the Worker.
 
 ## Docker Image CI

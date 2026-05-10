@@ -34,22 +34,33 @@ export async function runUpdate() {
 
 function getConfiguredSources() {
   return [1, 2, 3]
-    .map((index) => String(process.env[`SUB_URL_${index}`] || "").trim())
+    .map((index) => {
+      const sourceUrl = String(process.env[`SUB_URL_${index}`] || "").trim();
+      if (!sourceUrl) return null;
+
+      return {
+        index: index - 1,
+        sourceUrl,
+        fallbackEnabled: String(process.env[`SUB_FALLBACK_${index}`] || "").trim().toLowerCase() === "true"
+      };
+    })
     .filter(Boolean);
 }
 
-async function fetchSource(sourceUrl, index) {
+async function fetchSource(source, position) {
+  const { sourceUrl, index, fallbackEnabled } = source;
   const headers = getUpstreamRequestHeaders();
 
   const [direct, clash, shadowrocket] = await Promise.all([
-    fetchText(sourceUrl, headers, `direct ${index + 1}`),
-    fetchText(buildClashUrl(sourceUrl, index), headers, `clash ${index + 1}`),
-    fetchText(buildShadowrocketUrl(sourceUrl, index), headers, `shadowrocket ${index + 1}`)
+    fetchText(sourceUrl, headers, `direct ${position + 1}`),
+    fetchText(buildClashUrl(sourceUrl, position), headers, `clash ${position + 1}`),
+    fetchText(buildShadowrocketUrl(sourceUrl, position), headers, `shadowrocket ${position + 1}`)
   ]);
 
   return {
     index,
     source_url: sourceUrl,
+    fallback_enabled: fallbackEnabled,
     direct,
     clash,
     shadowrocket

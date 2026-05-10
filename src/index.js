@@ -5,6 +5,7 @@ const OBJECTS = {
   clash: "sub/latest.clash.yaml",
   shadowrocket: "sub/latest.shadowrocket.txt",
   meta: "sub/latest.meta.json",
+  sourceStatePrefix: "sub/source-state/",
   historyPrefix: "sub/history/"
 };
 
@@ -74,8 +75,9 @@ async function runExternalUpdate(env, payload) {
   }
 
   const sourceIndexes = [...sourceMap.keys()].sort((a, b) => a - b);
+  const fallbackState = await loadSourceFallbackState(env, sourceIndexes);
   const processedSources = sourceIndexes.map((index) =>
-    processExternalSource(index, sourceMap.get(index))
+    processExternalSource(index, sourceMap.get(index), fallbackState.get(index))
   );
 
   const clashResults = processedSources.map((source) => source.clashResult);
@@ -97,6 +99,7 @@ async function runExternalUpdate(env, payload) {
 
   const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
   await archiveExisting(env, now);
+  await saveSourceFallbackState(env, processedSources);
 
   await env.SUB_BUCKET.put(OBJECTS.clash, clashYaml, {
     httpMetadata: { contentType: TEXT_YAML }
@@ -126,7 +129,7 @@ async function runExternalUpdate(env, payload) {
   };
 }
 
-function processExternalSource(index, submittedSource) {
+function processExternalSource(index, submittedSource, fallbackState) {
   if (!submittedSource) {
     return {
       clashResult: {
@@ -145,10 +148,11 @@ function processExternalSource(index, submittedSource) {
   const direct = normalizeFetchedPayload(submittedSource.direct);
   const clash = normalizeFetchedPayload(submittedSource.clash);
   const shadowrocket = normalizeFetchedPayload(submittedSource.shadowrocket);
+  const fallbackEnabled = isFallbackEnabled(submittedSource);
 
   const directProxies = direct?.ok ? parseClashProxies(direct.text) : [];
   if (direct?.ok && directProxies.length > 0) {
-    return {
+    const result = {
       clashResult: {
         ok: true,
         value: {
@@ -161,12 +165,13 @@ function processExternalSource(index, submittedSource) {
       },
       shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
     };
+    return attachSourceState(result, submittedSource, direct, shadowrocket, "direct");
   }
 
   if (clash?.ok) {
     const proxies = parseClashProxies(clash.text);
     if (proxies.length > 0) {
-      return {
+      const result = {
         clashResult: {
           ok: true,
           value: {
@@ -179,7 +184,12 @@ function processExternalSource(index, submittedSource) {
         },
         shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
       };
+      return attachSourceState(result, submittedSource, clash, shadowrocket, "converter");
     }
+  }
+
+  if (fallbackEnabled && fallbackState) {
+    return buildFallbackSourceResult(index, submittedSource, fallbackState, direct, clash, shadowrocket);
   }
 
   return {
@@ -188,7 +198,69 @@ function processExternalSource(index, submittedSource) {
       index,
       error: formatExternalClashError(index, direct, clash)
     },
-    shadowrocketResult: buildShadowrocketResult(index, shadowrocket)
+    shadowrocketResult: buildShadowrocketResult(index, shadowrocket),
+    sourceState: null
+  };
+}
+
+function attachSourceState(result, submittedSource, clashPayload, shadowrocketPayload, mode) {
+  return {
+    ...result,
+    sourceState: {
+      sourceUrl: submittedSource?.source_url || null,
+      fallbackEnabled: isFallbackEnabled(submittedSource),
+      mode,
+      clash: serializeSuccessfulPayload(clashPayload),
+      shadowrocket: serializeSuccessfulPayload(shadowrocketPayload)
+    }
+  };
+}
+
+function buildFallbackSourceResult(index, submittedSource, fallbackState, direct, clash, shadowrocket) {
+  const storedClash = normalizeFetchedPayload(fallbackState.clash);
+  const storedShadowrocket = normalizeFetchedPayload(fallbackState.shadowrocket);
+  const proxies = storedClash?.ok ? parseClashProxies(storedClash.text) : [];
+
+  if (!storedClash?.ok || proxies.length === 0 || !storedShadowrocket?.ok) {
+    return {
+      clashResult: {
+        ok: false,
+        index,
+        error: formatExternalClashError(index, direct, clash)
+      },
+      shadowrocketResult: buildShadowrocketResult(index, shadowrocket),
+      sourceState: null
+    };
+  }
+
+  return {
+    clashResult: {
+      ok: true,
+      value: {
+        index,
+        status: storedClash.status,
+        mode: "fallback",
+        subscriptionUserinfo: storedClash.subscriptionUserinfo,
+        proxies
+      }
+    },
+    shadowrocketResult: {
+      ok: true,
+      value: {
+        index,
+        status: storedShadowrocket.status,
+        mode: "fallback",
+        subscriptionUserinfo: storedShadowrocket.subscriptionUserinfo,
+        text: storedShadowrocket.text
+      }
+    },
+    sourceState: {
+      sourceUrl: submittedSource?.source_url || fallbackState.sourceUrl || null,
+      fallbackEnabled: true,
+      mode: fallbackState.mode || "fallback",
+      clash: fallbackState.clash,
+      shadowrocket: fallbackState.shadowrocket
+    }
   };
 }
 
@@ -238,6 +310,20 @@ function normalizeFetchedPayload(value) {
     status: Number.isFinite(Number(value.status)) ? Number(value.status) : null,
     error: value.error ? String(value.error) : "fetch failed"
   };
+}
+
+function serializeSuccessfulPayload(value) {
+  if (!value?.ok) return null;
+  return {
+    ok: true,
+    status: value.status,
+    subscription_userinfo: value.subscriptionUserinfo,
+    text: value.text
+  };
+}
+
+function isFallbackEnabled(submittedSource) {
+  return Boolean(submittedSource?.fallback_enabled);
 }
 
 function formatExternalClashError(index, direct, clash) {
@@ -529,6 +615,39 @@ async function archiveExisting(env, now) {
   await archiveObject(env, OBJECTS.meta, `${OBJECTS.historyPrefix}${now}.meta.json`, JSON_TYPE);
 }
 
+async function loadSourceFallbackState(env, sourceIndexes) {
+  const entries = await Promise.all(sourceIndexes.map(async (index) => {
+    const obj = await env.SUB_BUCKET.get(sourceStateKey(index));
+    if (!obj) return [index, null];
+
+    try {
+      return [index, JSON.parse(await obj.text())];
+    } catch {
+      return [index, null];
+    }
+  }));
+
+  return new Map(entries);
+}
+
+async function saveSourceFallbackState(env, processedSources) {
+  await Promise.all(processedSources.map(async (source) => {
+    if (!source?.sourceState) return;
+
+    await env.SUB_BUCKET.put(
+      sourceStateKey(source.clashResult.value.index),
+      JSON.stringify(source.sourceState, null, 2),
+      {
+        httpMetadata: { contentType: JSON_TYPE }
+      }
+    );
+  }));
+}
+
+function sourceStateKey(index) {
+  return `${OBJECTS.sourceStatePrefix}${index}.json`;
+}
+
 async function archiveObject(env, fromKey, toKey, contentType) {
   const oldObj = await env.SUB_BUCKET.get(fromKey);
   if (!oldObj) return;
@@ -598,6 +717,7 @@ function publicSourceMeta(result) {
     index: result.value.index,
     status: result.value.status,
     mode: result.value.mode,
+    used_fallback: result.value.mode === "fallback",
     has_subscription_userinfo: Boolean(result.value.subscriptionUserinfo)
   };
 }
@@ -616,6 +736,7 @@ function publicShadowrocketMeta(result) {
     index: result.value.index,
     status: result.value.status,
     mode: result.value.mode,
+    used_fallback: result.value.mode === "fallback",
     has_subscription_userinfo: Boolean(result.value.subscriptionUserinfo)
   };
 }
