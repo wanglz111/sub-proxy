@@ -28,6 +28,7 @@ export async function runUpdate() {
   };
 
   const result = await postUpdateResult(workerBaseUrl, adminToken, payload);
+  logUpdateSummary(result);
   console.log(JSON.stringify(result, null, 2));
   return result;
 }
@@ -191,6 +192,38 @@ async function postUpdateResult(workerBaseUrl, adminToken, payload) {
   }
 
   return JSON.parse(text);
+}
+
+function logUpdateSummary(result) {
+  const clashSources = Array.isArray(result?.clash_sources) ? result.clash_sources : [];
+  if (clashSources.length === 0) return;
+
+  for (const source of clashSources) {
+    const sourceNo = Number(source.index) + 1;
+    if (source.ok) {
+      console.log(
+        `[source ${sourceNo}] clash ok mode=${source.mode} status=${source.status} fallback=${source.used_fallback ? "yes" : "no"}`
+      );
+      continue;
+    }
+
+    const firstLine = String(source.error || "unknown error").split("\n")[0];
+    console.log(`[source ${sourceNo}] clash failed ${firstLine}`);
+  }
+
+  const shadowrocketSources = Array.isArray(result?.shadowrocket_sources) ? result.shadowrocket_sources : [];
+  for (const source of shadowrocketSources) {
+    const sourceNo = Number(source.index) + 1;
+    if (source.ok) {
+      console.log(
+        `[source ${sourceNo}] shadowrocket ok mode=${source.mode} status=${source.status} fallback=${source.used_fallback ? "yes" : "no"}`
+      );
+      continue;
+    }
+
+    const firstLine = String(source.error || "unknown error").split("\n")[0];
+    console.log(`[source ${sourceNo}] shadowrocket failed ${firstLine}`);
+  }
 }
 
 function requiredEnv(name) {

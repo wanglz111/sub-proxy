@@ -109,6 +109,7 @@ docker compose logs -f
 ```
 
 Default behavior is one update every 1800 seconds.
+The updater logs per-source summaries such as `mode=converter`, `mode=fallback`, or the first failure line, which makes it easier to see why a specific subscription source was not included.
 
 By default, [compose.yaml](/home/lucascool/sub-proxy/compose.yaml) pulls the published GHCR image:
 

@@ -100,6 +100,8 @@ async function runExternalUpdate(env, payload) {
   const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
   await archiveExisting(env, now);
   await saveSourceFallbackState(env, processedSources);
+  const clashSourceMeta = clashResults.map(publicSourceMeta);
+  const shadowrocketSourceMeta = shadowrocketResults.map(publicShadowrocketMeta);
 
   await env.SUB_BUCKET.put(OBJECTS.clash, clashYaml, {
     httpMetadata: { contentType: TEXT_YAML }
@@ -114,8 +116,8 @@ async function runExternalUpdate(env, payload) {
     upstream_count: submittedSources.length,
     proxy_count: proxies.length,
     subscription_userinfo: subscriptionUserinfo,
-    clash_sources: clashResults.map(publicSourceMeta),
-    shadowrocket_sources: shadowrocketResults.map(publicShadowrocketMeta)
+    clash_sources: clashSourceMeta,
+    shadowrocket_sources: shadowrocketSourceMeta
   }, null, 2), {
     httpMetadata: { contentType: JSON_TYPE }
   });
@@ -125,7 +127,9 @@ async function runExternalUpdate(env, payload) {
     updated_at: now,
     update_mode: "external-fetch",
     upstream_count: submittedSources.length,
-    proxy_count: proxies.length
+    proxy_count: proxies.length,
+    clash_sources: clashSourceMeta,
+    shadowrocket_sources: shadowrocketSourceMeta
   };
 }
 
