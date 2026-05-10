@@ -70,10 +70,10 @@ The VPS updater can run as a single long-running container.
 1. Copy the example env file:
 
 ```bash
-cp .env.docker.example .env.docker
+cp .env.docker.example .env
 ```
 
-2. Edit `.env.docker`:
+2. Edit `.env`:
 
 ```dotenv
 WORKER_BASE_URL=https://sub.example.com
@@ -84,7 +84,7 @@ UPDATE_INTERVAL_SECONDS=1800
 3. Start the updater:
 
 ```bash
-docker compose --env-file .env.docker up -d
+docker compose up -d
 ```
 
 4. Watch logs:
@@ -103,9 +103,9 @@ services:
     image: ghcr.io/wanglz111/sub-proxy-updater:latest
     container_name: sub-proxy-updater
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      WORKER_BASE_URL: ${WORKER_BASE_URL}
-      ADMIN_TOKEN: ${ADMIN_TOKEN}
       UPDATE_INTERVAL_SECONDS: ${UPDATE_INTERVAL_SECONDS:-1800}
 ```
 
@@ -153,7 +153,7 @@ docker pull ghcr.io/wanglz111/sub-proxy-updater:latest
 
 ## Behavior Notes
 
-- Cloudflare Cron is no longer the fetcher. It only logs that external updater mode is enabled.
+- Cloudflare Worker no longer performs any scheduled update. Subscription refresh is fully driven by the VPS updater.
 - The Worker still does deduplication, Clash template assembly, Shadowrocket merge, metadata generation, and R2 archival.
 - If a direct upstream response is already Clash YAML with `proxies`, the Worker prefers that.
 - If the direct response is not Clash YAML, the VPS also fetches the converter URLs provided by the Worker, and the Worker falls back to those results.

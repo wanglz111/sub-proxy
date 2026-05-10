@@ -3,7 +3,7 @@ services:
     image: ghcr.io/wanglz111/sub-proxy-updater:latest
     container_name: sub-proxy-updater
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      WORKER_BASE_URL: ${WORKER_BASE_URL}
-      ADMIN_TOKEN: ${ADMIN_TOKEN}
       UPDATE_INTERVAL_SECONDS: ${UPDATE_INTERVAL_SECONDS:-1800}

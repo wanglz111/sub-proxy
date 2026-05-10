@@ -7,10 +7,6 @@ routes = [
   { pattern = "sub.gleaftex.com", zone_name = "gleaftex.com", custom_domain = true }
 ]
 
-# Cloudflare Cron uses UTC. 16:00 UTC = 00:00 Asia/Shanghai.
-[triggers]
-crons = ["0 16 * * *"]
-
 [[r2_buckets]]
 binding = "SUB_BUCKET"
 bucket_name = "sub"

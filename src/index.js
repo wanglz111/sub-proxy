@@ -61,13 +61,6 @@ export default {
         status
       });
     }
-  },
-
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.resolve().then(() => {
-      console.log("Cron skipped for external updater mode:", event.cron);
-      void env;
-    }));
   }
 };
 
