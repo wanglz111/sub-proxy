@@ -16,9 +16,6 @@ bucket_name = "sub"
 # / ?token=ACCESS_TOKEN or Authorization: Bearer <token>.
 REQUIRE_SUB_TOKEN = "true"
 
-# Converter compatible with subconverter-style query params.
-CONVERTER_BASE_URL = "https://api.wd-purple.com/sub"
-
 [observability]
 enabled = true
 

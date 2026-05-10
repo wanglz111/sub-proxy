@@ -1,6 +1,5 @@
 import YAML from "yaml";
 import { CLASH_TEMPLATE } from "./config/clash-template.js";
-import { SUBSCRIPTION_CONFIG } from "./config/subscriptions.js";
 
 const OBJECTS = {
   clash: "sub/latest.clash.yaml",
@@ -21,10 +20,6 @@ export default {
       if (url.pathname === "/update") {
         requireAdmin(request, env);
 
-        if (request.method === "GET") {
-          return jsonResponse(buildExternalUpdateJob(env));
-        }
-
         if (request.method === "POST") {
           const payload = await request.json();
           const result = await runExternalUpdate(env, payload);
@@ -34,7 +29,7 @@ export default {
         return new Response("Method Not Allowed", {
           status: 405,
           headers: {
-            Allow: "GET, POST"
+            Allow: "POST"
           }
         });
       }
@@ -64,50 +59,7 @@ export default {
   }
 };
 
-function buildExternalUpdateJob(env) {
-  const upstreamUrls = getUpstreamUrls(env);
-  if (upstreamUrls.length === 0) {
-    throw httpError(400, "No upstream subscriptions configured. Set SUB_URLS.");
-  }
-
-  const converterBaseUrl = env[SUBSCRIPTION_CONFIG.converterBaseUrlEnv] ||
-    SUBSCRIPTION_CONFIG.defaultConverterBaseUrl;
-
-  return {
-    ok: true,
-    mode: "external-fetch",
-    requested_at: new Date().toISOString(),
-    upstream_count: upstreamUrls.length,
-    request_headers: SUBSCRIPTION_CONFIG.requestHeaders,
-    sources: upstreamUrls.map((subUrl, index) => ({
-      index,
-      source_url: subUrl,
-      request_headers: SUBSCRIPTION_CONFIG.requestHeaders,
-      direct_url: subUrl,
-      clash_url: isConvertedSubscriptionUrl(subUrl) ? convertExistingConverterUrl(subUrl, {
-        ...SUBSCRIPTION_CONFIG.clashConverterParams,
-        filename: `sub-${index + 1}`
-      }) : buildConverterUrl(converterBaseUrl, subUrl, {
-        ...SUBSCRIPTION_CONFIG.clashConverterParams,
-        filename: `sub-${index + 1}`
-      }),
-      shadowrocket_url: isConvertedSubscriptionUrl(subUrl) ? convertExistingConverterUrl(subUrl, {
-        ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
-        filename: `sub-${index + 1}`
-      }) : buildConverterUrl(converterBaseUrl, subUrl, {
-        ...SUBSCRIPTION_CONFIG.shadowrocketConverterParams,
-        filename: `sub-${index + 1}`
-      })
-    }))
-  };
-}
-
 async function runExternalUpdate(env, payload) {
-  const upstreamUrls = getUpstreamUrls(env);
-  if (upstreamUrls.length === 0) {
-    throw httpError(400, "No upstream subscriptions configured. Set SUB_URLS.");
-  }
-
   const submittedSources = Array.isArray(payload?.sources) ? payload.sources : null;
   if (!submittedSources || submittedSources.length === 0) {
     throw httpError(400, "POST /update requires a JSON body with a non-empty sources array.");
@@ -121,8 +73,9 @@ async function runExternalUpdate(env, payload) {
     sourceMap.set(entry.index, entry);
   }
 
-  const processedSources = upstreamUrls.map((subUrl, index) =>
-    processExternalSource(index, subUrl, sourceMap.get(index))
+  const sourceIndexes = [...sourceMap.keys()].sort((a, b) => a - b);
+  const processedSources = sourceIndexes.map((index) =>
+    processExternalSource(index, sourceMap.get(index))
   );
 
   const clashResults = processedSources.map((source) => source.clashResult);
@@ -155,7 +108,7 @@ async function runExternalUpdate(env, payload) {
     updated_at: new Date().toISOString(),
     update_mode: "external-fetch",
     updater_requested_at: payload?.requested_at || null,
-    upstream_count: upstreamUrls.length,
+    upstream_count: submittedSources.length,
     proxy_count: proxies.length,
     subscription_userinfo: subscriptionUserinfo,
     clash_sources: clashResults.map(publicSourceMeta),
@@ -168,12 +121,12 @@ async function runExternalUpdate(env, payload) {
     ok: true,
     updated_at: now,
     update_mode: "external-fetch",
-    upstream_count: upstreamUrls.length,
+    upstream_count: submittedSources.length,
     proxy_count: proxies.length
   };
 }
 
-function processExternalSource(index, subUrl, submittedSource) {
+function processExternalSource(index, submittedSource) {
   if (!submittedSource) {
     return {
       clashResult: {
@@ -185,21 +138,6 @@ function processExternalSource(index, subUrl, submittedSource) {
         ok: false,
         index,
         error: `source ${index + 1} missing from submitted update payload`
-      }
-    };
-  }
-
-  if (submittedSource.source_url && submittedSource.source_url !== subUrl) {
-    return {
-      clashResult: {
-        ok: false,
-        index,
-        error: `source ${index + 1} URL mismatch`
-      },
-      shadowrocketResult: {
-        ok: false,
-        index,
-        error: `source ${index + 1} URL mismatch`
       }
     };
   }
@@ -322,32 +260,6 @@ function formatExternalClashError(index, direct, clash) {
   }
 
   return parts.join("\n");
-}
-
-function buildConverterUrl(baseUrl, subUrl, params) {
-  const url = new URL(baseUrl);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-  url.searchParams.set("url", subUrl);
-  return url.toString();
-}
-
-function isConvertedSubscriptionUrl(subUrl) {
-  try {
-    const url = new URL(subUrl);
-    return url.searchParams.has("target") && url.searchParams.has("url");
-  } catch {
-    return false;
-  }
-}
-
-function convertExistingConverterUrl(subUrl, params) {
-  const url = new URL(subUrl);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
-  return url.toString();
 }
 
 function parseClashProxies(text) {
@@ -648,13 +560,6 @@ async function serveObject(env, key, contentType) {
   }
 
   return new Response(obj.body, { headers });
-}
-
-function getUpstreamUrls(env) {
-  return String(env.SUB_URLS || "")
-    .split(/[\n,]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
 }
 
 function requireAdmin(request, env) {

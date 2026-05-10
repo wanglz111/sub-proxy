@@ -6,12 +6,16 @@ Cloudflare Worker subscription proxy for:
 - Shadowrocket: `/shadowrocket`
 
 This version is designed for upstream providers that block Cloudflare egress IPs.
-The Worker no longer fetches upstream subscriptions directly. Instead:
+The Worker now only stores and serves generated subscription outputs. All upstream subscription fetching happens on your VPS.
 
-1. Your VPS requests `GET /update` from the Worker to receive the current update job.
-2. The VPS fetches each upstream subscription itself.
-3. The VPS sends the raw results back to `POST /update`.
-4. The Worker merges proxies, applies your local Clash template, stores outputs in R2, and serves clients.
+## Architecture
+
+1. Your VPS reads `SUB_URL_1` to `SUB_URL_3` from `.env`.
+2. The VPS fetches upstream subscriptions directly.
+3. The VPS posts raw fetch results to `POST /update`.
+4. The Worker merges proxies, applies your Clash template, stores outputs in R2, and serves clients.
+
+Worker no longer stores upstream subscription URLs.
 
 ## Worker Setup
 
@@ -27,16 +31,12 @@ Create the R2 bucket if it does not already exist:
 npx wrangler r2 bucket create sub
 ```
 
-Use secrets for real tokens and links:
+Set secrets for access control only:
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put ACCESS_TOKEN
-npx wrangler secret put SUB_URLS
 ```
-
-`SUB_URLS` supports comma-separated or line-separated URLs.
-Raw upstream subscription links and already-converted subscription links are both accepted.
 
 Deploy:
 
@@ -49,7 +49,6 @@ npm run deploy
 Admin endpoints:
 
 ```text
-GET  https://your-worker.workers.dev/update?token=ADMIN_TOKEN
 POST https://your-worker.workers.dev/update?token=ADMIN_TOKEN
 GET  https://your-worker.workers.dev/meta?token=ADMIN_TOKEN
 ```
@@ -65,7 +64,7 @@ https://your-worker.workers.dev/shadowrocket?token=ACCESS_TOKEN
 
 ## Docker Compose
 
-The VPS updater can run as a single long-running container.
+The VPS updater runs as a single long-running container and reads all upstream subscription config from `.env`.
 
 1. Copy the example env file:
 
@@ -79,7 +78,18 @@ cp .env.docker.example .env
 WORKER_BASE_URL=https://sub.example.com
 ADMIN_TOKEN=replace-with-your-admin-token
 UPDATE_INTERVAL_SECONDS=1800
+
+CONVERTER_BASE_URL=https://api.wd-purple.com/sub
+UPSTREAM_USER_AGENT=ClashParty/1.8.3 CFNetwork/1410.1 Darwin/22.6.0
+UPSTREAM_ACCEPT=*/*
+UPSTREAM_ACCEPT_LANGUAGE=zh-CN,zh-Hans;q=0.9
+
+SUB_URL_1=https://example.com/subscription-1
+SUB_URL_2=https://example.com/subscription-2
+SUB_URL_3=
 ```
+
+`SUB_URL_1` and `SUB_URL_2` are typical. `SUB_URL_3` is optional and can be left empty.
 
 3. Start the updater:
 
@@ -124,6 +134,9 @@ The one-shot updater script lives at [scripts/vps-update.mjs](/home/lucascool/su
 ```bash
 export WORKER_BASE_URL="https://sub.example.com"
 export ADMIN_TOKEN="your-admin-token"
+export SUB_URL_1="https://example.com/subscription-1"
+export SUB_URL_2="https://example.com/subscription-2"
+export SUB_URL_3=""
 npm run update:vps
 ```
 
@@ -133,8 +146,20 @@ Loop mode without Docker:
 export WORKER_BASE_URL="https://sub.example.com"
 export ADMIN_TOKEN="your-admin-token"
 export UPDATE_INTERVAL_SECONDS="1800"
+export SUB_URL_1="https://example.com/subscription-1"
+export SUB_URL_2="https://example.com/subscription-2"
+export SUB_URL_3=""
 npm run update:vps:loop
 ```
+
+## Behavior Notes
+
+- Cloudflare Worker performs no scheduled update and stores no upstream source list.
+- Subscription refresh is fully driven by the VPS updater.
+- The Worker still does deduplication, Clash template assembly, Shadowrocket merge, metadata generation, and R2 archival.
+- If a direct upstream response is already Clash YAML with `proxies`, the Worker prefers that.
+- If the direct response is not Clash YAML, the VPS also fetches converter URLs and the Worker falls back to those results.
+- Upstream request headers are controlled from the VPS `.env`, so you can adjust client impersonation without redeploying the Worker.
 
 ## Docker Image CI
 
@@ -144,24 +169,10 @@ GitHub Actions builds the updater image automatically with [docker-image.yml](/h
 - Push tag like `v1.0.0`: publish a matching version tag
 - Pull request: build-only validation, no push
 
-To pull from GHCR on your VPS, make sure the package is public or log in first:
-
-```bash
-docker login ghcr.io
-docker pull ghcr.io/wanglz111/sub-proxy-updater:latest
-```
-
-## Behavior Notes
-
-- Cloudflare Worker no longer performs any scheduled update. Subscription refresh is fully driven by the VPS updater.
-- The Worker still does deduplication, Clash template assembly, Shadowrocket merge, metadata generation, and R2 archival.
-- If a direct upstream response is already Clash YAML with `proxies`, the Worker prefers that.
-- If the direct response is not Clash YAML, the VPS also fetches the converter URLs provided by the Worker, and the Worker falls back to those results.
-
 ## Files To Edit
 
-- `src/config/subscriptions.js`: upstream/converter behavior.
+- `.env`: VPS updater settings, upstream URLs, and request headers.
 - `src/config/clash-template.js`: your Clash/Mihomo DNS, groups, ACL4SSR rule-providers, and rules.
-- `wrangler.toml`: Worker route and variables.
+- `wrangler.toml`: Worker route and access-control variables.
 
-Do not commit real subscription URLs if the repository is public. Put them in Cloudflare secrets instead.
+Do not commit real subscription URLs if the repository is public.

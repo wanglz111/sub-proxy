@@ -1,62 +1,134 @@
 #!/usr/bin/env node
 
+import { pathToFileURL } from "node:url";
+
+const DEFAULT_CONVERTER_BASE_URL = "https://api.wd-purple.com/sub";
+const DEFAULT_HEADERS = {
+  "User-Agent": "ClashParty/1.8.3 CFNetwork/1410.1 Darwin/22.6.0",
+  "Accept": "*/*",
+  "Accept-Language": "zh-CN,zh-Hans;q=0.9"
+};
+
 export async function runUpdate() {
   const workerBaseUrl = requiredEnv("WORKER_BASE_URL");
   const adminToken = requiredEnv("ADMIN_TOKEN");
-  const job = await fetchUpdateJob();
-  const sources = await Promise.all(job.sources.map(fetchSource));
+  const sources = getConfiguredSources();
+
+  if (sources.length === 0) {
+    throw new Error("No subscription sources configured. Set SUB_URL_1, SUB_URL_2, or SUB_URL_3 in .env.");
+  }
+
+  const fetchedSources = await Promise.all(
+    sources.map((source, index) => fetchSource(source, index))
+  );
 
   const payload = {
-    requested_at: job.requested_at,
-    sources
+    requested_at: new Date().toISOString(),
+    sources: fetchedSources
   };
 
-  const result = await postUpdateResult(payload);
+  const result = await postUpdateResult(workerBaseUrl, adminToken, payload);
   console.log(JSON.stringify(result, null, 2));
   return result;
 }
 
-async function fetchUpdateJob() {
-  const workerBaseUrl = requiredEnv("WORKER_BASE_URL");
-  const adminToken = requiredEnv("ADMIN_TOKEN");
-  const url = new URL("/update", workerBaseUrl);
-  url.searchParams.set("token", adminToken);
-
-  const resp = await fetch(url, {
-    headers: {
-      Accept: "application/json"
-    }
-  });
-
-  const text = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`fetch update job failed\nstatus=${resp.status}\n${text.slice(0, 1000)}`);
-  }
-
-  const job = JSON.parse(text);
-  if (!Array.isArray(job?.sources) || job.sources.length === 0) {
-    throw new Error("update job did not include any sources");
-  }
-
-  return job;
+function getConfiguredSources() {
+  return [1, 2, 3]
+    .map((index) => String(process.env[`SUB_URL_${index}`] || "").trim())
+    .filter(Boolean);
 }
 
-async function fetchSource(source) {
-  const headers = source.request_headers || {};
+async function fetchSource(sourceUrl, index) {
+  const headers = getUpstreamRequestHeaders();
 
   const [direct, clash, shadowrocket] = await Promise.all([
-    fetchText(source.direct_url, headers, `direct ${source.index + 1}`),
-    fetchText(source.clash_url, headers, `clash ${source.index + 1}`),
-    fetchText(source.shadowrocket_url, headers, `shadowrocket ${source.index + 1}`)
+    fetchText(sourceUrl, headers, `direct ${index + 1}`),
+    fetchText(buildClashUrl(sourceUrl, index), headers, `clash ${index + 1}`),
+    fetchText(buildShadowrocketUrl(sourceUrl, index), headers, `shadowrocket ${index + 1}`)
   ]);
 
   return {
-    index: source.index,
-    source_url: source.source_url,
+    index,
+    source_url: sourceUrl,
     direct,
     clash,
     shadowrocket
   };
+}
+
+function getUpstreamRequestHeaders() {
+  return {
+    "User-Agent": String(process.env.UPSTREAM_USER_AGENT || DEFAULT_HEADERS["User-Agent"]).trim(),
+    "Accept": String(process.env.UPSTREAM_ACCEPT || DEFAULT_HEADERS.Accept).trim(),
+    "Accept-Language": String(process.env.UPSTREAM_ACCEPT_LANGUAGE || DEFAULT_HEADERS["Accept-Language"]).trim()
+  };
+}
+
+function buildClashUrl(sourceUrl, index) {
+  return isConvertedSubscriptionUrl(sourceUrl)
+    ? convertExistingConverterUrl(sourceUrl, {
+      target: "clash",
+      emoji: "true",
+      udp: "true",
+      scv: "true",
+      new_name: "true",
+      filename: `sub-${index + 1}`
+    })
+    : buildConverterUrl(sourceUrl, {
+      target: "clash",
+      emoji: "true",
+      udp: "true",
+      scv: "true",
+      new_name: "true",
+      filename: `sub-${index + 1}`
+    });
+}
+
+function buildShadowrocketUrl(sourceUrl, index) {
+  return isConvertedSubscriptionUrl(sourceUrl)
+    ? convertExistingConverterUrl(sourceUrl, {
+      target: "shadowrocket",
+      emoji: "true",
+      udp: "true",
+      scv: "true",
+      new_name: "true",
+      filename: `sub-${index + 1}`
+    })
+    : buildConverterUrl(sourceUrl, {
+      target: "shadowrocket",
+      emoji: "true",
+      udp: "true",
+      scv: "true",
+      new_name: "true",
+      filename: `sub-${index + 1}`
+    });
+}
+
+function buildConverterUrl(sourceUrl, params) {
+  const baseUrl = String(process.env.CONVERTER_BASE_URL || DEFAULT_CONVERTER_BASE_URL).trim();
+  const url = new URL(baseUrl);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  url.searchParams.set("url", sourceUrl);
+  return url.toString();
+}
+
+function isConvertedSubscriptionUrl(sourceUrl) {
+  try {
+    const url = new URL(sourceUrl);
+    return url.searchParams.has("target") && url.searchParams.has("url");
+  } catch {
+    return false;
+  }
+}
+
+function convertExistingConverterUrl(sourceUrl, params) {
+  const url = new URL(sourceUrl);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
 }
 
 async function fetchText(url, headers, label) {
@@ -89,9 +161,7 @@ async function fetchText(url, headers, label) {
   }
 }
 
-async function postUpdateResult(payload) {
-  const workerBaseUrl = requiredEnv("WORKER_BASE_URL");
-  const adminToken = requiredEnv("ADMIN_TOKEN");
+async function postUpdateResult(workerBaseUrl, adminToken, payload) {
   const url = new URL("/update", workerBaseUrl);
   url.searchParams.set("token", adminToken);
 
@@ -128,4 +198,3 @@ if (entryUrl && import.meta.url === entryUrl) {
     process.exitCode = 1;
   });
 }
-import { pathToFileURL } from "node:url";
